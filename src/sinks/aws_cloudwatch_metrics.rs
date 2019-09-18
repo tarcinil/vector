@@ -20,18 +20,13 @@ use std::collections::{HashMap, HashSet};
 use std::{convert::TryInto, time::Duration};
 use tower::{Service, ServiceBuilder};
 
-#[derive(Clone, Default)]
-struct State {
-    gauges: HashMap<String, f64>,
-}
-
 #[derive(Clone)]
 pub struct CloudWatchMetricsSvc {
     client: CloudWatchClient,
     config: CloudWatchMetricsSinkConfig,
-    state: State,
 }
 
+#[derive(Clone)]
 struct AggregatedMetric<T> {
     vals: Vec<T>,
     timestamp: Option<DateTime<Utc>>,
@@ -40,6 +35,7 @@ struct AggregatedMetric<T> {
 struct MetricBuffer {
     num_items: usize,
     counters: HashMap<String, AggregatedMetric<f64>>,
+    gauges: HashMap<String, AggregatedMetric<f64>>,
     sets: HashMap<String, AggregatedMetric<String>>,
 }
 
@@ -48,6 +44,7 @@ impl MetricBuffer {
         Self {
             num_items: 0,
             counters: HashMap::new(),
+            gauges: HashMap::new(),
             sets: HashMap::new(),
         }
     }
@@ -80,7 +77,32 @@ impl Batch for MetricBuffer {
                 counter.vals.push(val);
                 counter.timestamp = timestamp;
             }
-            Metric::Gauge { .. } => {}
+            Metric::Gauge {
+                name,
+                val,
+                direction,
+                timestamp,
+                ..
+            } => {
+                let _delta = match direction {
+                    None => 0.0,
+                    Some(Direction::Plus) => val,
+                    Some(Direction::Minus) => -val,
+                };
+
+                let mut gauge = self.gauges.entry(name).or_insert(AggregatedMetric::<f64> {
+                    vals: Vec::new(),
+                    timestamp,
+                });
+
+                if direction.is_none() {
+                    gauge.vals.push(val);
+                } else {
+                    // *v += delta
+                    unimplemented!();
+                }
+                gauge.timestamp = timestamp;
+            }
             Metric::Set {
                 name,
                 val,
@@ -106,6 +128,7 @@ impl Batch for MetricBuffer {
         Self {
             num_items: 0,
             counters: HashMap::new(),
+            gauges: self.gauges.clone(),
             sets: HashMap::new(),
         }
     }
@@ -115,6 +138,16 @@ impl Batch for MetricBuffer {
             Event::Metric(Metric::Counter {
                 name: k.to_string(),
                 val: v.vals.iter().sum::<f64>(),
+                timestamp: v.timestamp,
+                tags: None,
+            })
+        });
+
+        let gauges = self.gauges.into_iter().map(|(k, v)| {
+            Event::Metric(Metric::Gauge {
+                name: k.to_string(),
+                val: *v.vals.iter().last().unwrap_or(&0.0),
+                direction: None,
                 timestamp: v.timestamp,
                 tags: None,
             })
@@ -131,7 +164,7 @@ impl Batch for MetricBuffer {
             })
         });
 
-        counters.chain(sets).collect()
+        counters.chain(gauges).chain(sets).collect()
     }
 
     fn num_items(&self) -> usize {
@@ -193,13 +226,7 @@ impl CloudWatchMetricsSvc {
             CloudWatchMetricsRetryLogic,
         );
 
-        let state = State::default();
-
-        let cloudwatch_metrics = CloudWatchMetricsSvc {
-            client,
-            config,
-            state,
-        };
+        let cloudwatch_metrics = CloudWatchMetricsSvc { client, config };
 
         let svc = ServiceBuilder::new()
             .concurrency_limit(in_flight_limit)
@@ -275,37 +302,16 @@ impl CloudWatchMetricsSvc {
                 Metric::Gauge {
                     name,
                     val,
-                    direction,
+                    direction: None,
                     timestamp,
                     tags,
-                } => {
-                    let delta = match direction {
-                        None => 0.0,
-                        Some(Direction::Plus) => val,
-                        Some(Direction::Minus) => -val,
-                    };
-
-                    let val = self
-                        .state
-                        .gauges
-                        .entry(name.clone())
-                        .and_modify(|v| {
-                            if direction.is_none() {
-                                *v = val
-                            } else {
-                                *v += delta
-                            }
-                        })
-                        .or_insert(val);
-
-                    Some(MetricDatum {
-                        metric_name: name.to_string(),
-                        value: Some(*val),
-                        timestamp: timestamp.map(timestamp_to_string),
-                        dimensions: tags.map(tags_to_dimensions),
-                        ..Default::default()
-                    })
-                }
+                } => Some(MetricDatum {
+                    metric_name: name.to_string(),
+                    value: Some(val),
+                    timestamp: timestamp.map(timestamp_to_string),
+                    dimensions: tags.map(tags_to_dimensions),
+                    ..Default::default()
+                }),
                 Metric::Histogram {
                     name,
                     val,
@@ -320,35 +326,7 @@ impl CloudWatchMetricsSvc {
                     dimensions: tags.map(tags_to_dimensions),
                     ..Default::default()
                 }),
-                Metric::Set {
-                    name,
-                    val,
-                    timestamp,
-                    tags,
-                } => {
-                    // let count = match self.state.sets.get_mut(&name) {
-                    //     None => {
-                    //         let mut cache =
-                    //             LruCache::with_expiry_duration(Duration::from_millis(10));
-                    //         cache.insert(val, ());
-                    //         self.state.sets.insert(name.clone(), cache);
-                    //         1
-                    //     }
-                    //     Some(cache) => {
-                    //         cache.insert(val, ());
-                    //         cache.len()
-                    //     }
-                    // };
-
-                    Some(MetricDatum {
-                        metric_name: name.to_string(),
-                        // value: Some(count as f64),
-                        value: Some(1.0),
-                        timestamp: timestamp.map(timestamp_to_string),
-                        dimensions: tags.map(tags_to_dimensions),
-                        ..Default::default()
-                    })
-                }
+                _ => unimplemented!(),
             })
             .collect();
 
@@ -438,7 +416,6 @@ mod tests {
     use chrono::offset::TimeZone;
     use pretty_assertions::assert_eq;
     use rusoto_cloudwatch::PutMetricDataInput;
-    use std::thread;
 
     fn config() -> CloudWatchMetricsSinkConfig {
         CloudWatchMetricsSinkConfig {
@@ -452,12 +429,10 @@ mod tests {
         let config = config();
         let region = config.region.clone().try_into().unwrap();
         let client = CloudWatchMetricsSvc::create_client(region).unwrap();
-        let state = State::default();
 
         CloudWatchMetricsSvc {
             client,
             config,
-            state,
         }
     }
 
@@ -543,69 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_events_relative_gauge() {
-        let events = vec![
-            Event::Metric(Metric::Gauge {
-                name: "temperature".into(),
-                val: 10.0,
-                direction: None,
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Gauge {
-                name: "temperature".into(),
-                val: 1.0,
-                direction: Some(Direction::Plus),
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Gauge {
-                name: "temperature".into(),
-                val: 1.5,
-                direction: Some(Direction::Minus),
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Gauge {
-                name: "temperature".into(),
-                val: 3.2,
-                direction: None,
-                timestamp: None,
-                tags: None,
-            }),
-        ];
-
-        assert_eq!(
-            svc().encode_events(events),
-            PutMetricDataInput {
-                namespace: "vector".into(),
-                metric_data: vec![
-                    MetricDatum {
-                        metric_name: "temperature".into(),
-                        value: Some(10.0),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "temperature".into(),
-                        value: Some(11.0),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "temperature".into(),
-                        value: Some(9.5),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "temperature".into(),
-                        value: Some(3.2),
-                        ..Default::default()
-                    },
-                ],
-            }
-        );
-    }
-
-    #[test]
     fn encode_events_histogram() {
         let events = vec![Event::Metric(Metric::Histogram {
             name: "latency".into(),
@@ -625,92 +537,6 @@ mod tests {
                     counts: Some(vec![100.0]),
                     ..Default::default()
                 }],
-            }
-        );
-    }
-
-    #[test]
-    fn encode_events_set() {
-        let events1 = vec![
-            Event::Metric(Metric::Set {
-                name: "user_id".into(),
-                val: "abc123".into(),
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Set {
-                name: "user_id".into(),
-                val: "xyz987".into(),
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Set {
-                name: "ip".into(),
-                val: "1.2.3.4".into(),
-                timestamp: None,
-                tags: None,
-            }),
-        ];
-
-        let events2 = vec![
-            Event::Metric(Metric::Set {
-                name: "user_id".into(),
-                val: "abc123".into(),
-                timestamp: None,
-                tags: None,
-            }),
-            Event::Metric(Metric::Set {
-                name: "ip".into(),
-                val: "2.3.4.5".into(),
-                timestamp: None,
-                tags: None,
-            }),
-        ];
-
-        let mut service = svc();
-
-        assert_eq!(
-            service.encode_events(events1),
-            PutMetricDataInput {
-                namespace: "vector".into(),
-                metric_data: vec![
-                    MetricDatum {
-                        metric_name: "user_id".into(),
-                        value: Some(1.0),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "user_id".into(),
-                        value: Some(1.0),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "ip".into(),
-                        value: Some(1.0),
-                        ..Default::default()
-                    }
-                ],
-            }
-        );
-
-        thread::sleep(Duration::from_millis(100));
-
-        assert_eq!(
-            service.encode_events(events2),
-            PutMetricDataInput {
-                namespace: "vector".into(),
-                metric_data: vec![
-                    MetricDatum {
-                        metric_name: "user_id".into(),
-                        value: Some(1.0),
-                        ..Default::default()
-                    },
-                    MetricDatum {
-                        metric_name: "ip".into(),
-                        value: Some(1.0),
-                        ..Default::default()
-                    }
-                ],
             }
         );
     }
