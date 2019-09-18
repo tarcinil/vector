@@ -26,8 +26,9 @@ pub struct CloudWatchMetricsSvc {
     config: CloudWatchMetricsSinkConfig,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct AggregatedMetric<T> {
+    val: f64,
     vals: Vec<T>,
     timestamp: Option<DateTime<Utc>>,
 }
@@ -67,13 +68,8 @@ impl Batch for MetricBuffer {
                 timestamp,
                 ..
             } => {
-                let mut counter = self
-                    .counters
-                    .entry(name)
-                    .or_insert(AggregatedMetric::<f64> {
-                        vals: Vec::new(),
-                        timestamp,
-                    });
+                let mut counter = self.counters.entry(name).or_default();
+                counter.val += val;
                 counter.vals.push(val);
                 counter.timestamp = timestamp;
             }
@@ -84,23 +80,19 @@ impl Batch for MetricBuffer {
                 timestamp,
                 ..
             } => {
-                let _delta = match direction {
-                    None => 0.0,
-                    Some(Direction::Plus) => val,
-                    Some(Direction::Minus) => -val,
-                };
-
-                let mut gauge = self.gauges.entry(name).or_insert(AggregatedMetric::<f64> {
-                    vals: Vec::new(),
-                    timestamp,
-                });
+                let mut gauge = self.gauges.entry(name).or_default();
 
                 if direction.is_none() {
-                    gauge.vals.push(val);
+                    gauge.val = val;
                 } else {
-                    // *v += delta
-                    unimplemented!();
+                    let delta = match direction {
+                        None => 0.0,
+                        Some(Direction::Plus) => val,
+                        Some(Direction::Minus) => -val,
+                    };
+                    gauge.val += delta;
                 }
+                gauge.vals.push(val);
                 gauge.timestamp = timestamp;
             }
             Metric::Set {
@@ -109,10 +101,7 @@ impl Batch for MetricBuffer {
                 timestamp,
                 ..
             } => {
-                let mut set = self.sets.entry(name).or_insert(AggregatedMetric::<String> {
-                    vals: Vec::new(),
-                    timestamp,
-                });
+                let mut set = self.sets.entry(name).or_default();
                 set.vals.push(val);
                 set.timestamp = timestamp;
             }
@@ -137,7 +126,7 @@ impl Batch for MetricBuffer {
         let counters = self.counters.into_iter().map(|(k, v)| {
             Event::Metric(Metric::Counter {
                 name: k.to_string(),
-                val: v.vals.iter().sum::<f64>(),
+                val: v.val,
                 timestamp: v.timestamp,
                 tags: None,
             })
@@ -146,7 +135,7 @@ impl Batch for MetricBuffer {
         let gauges = self.gauges.into_iter().map(|(k, v)| {
             Event::Metric(Metric::Gauge {
                 name: k.to_string(),
-                val: *v.vals.iter().last().unwrap_or(&0.0),
+                val: v.val,
                 direction: None,
                 timestamp: v.timestamp,
                 tags: None,
@@ -430,10 +419,7 @@ mod tests {
         let region = config.region.clone().try_into().unwrap();
         let client = CloudWatchMetricsSvc::create_client(region).unwrap();
 
-        CloudWatchMetricsSvc {
-            client,
-            config,
-        }
+        CloudWatchMetricsSvc { client, config }
     }
 
     #[test]
@@ -554,7 +540,7 @@ mod integration_tests {
     fn config() -> CloudWatchMetricsSinkConfig {
         CloudWatchMetricsSinkConfig {
             namespace: "vector".into(),
-            batch_size: Some(9),
+            batch_size: Some(100),
             batch_timeout: Some(1),
             region: RegionOrEndpoint::with_endpoint("http://localhost:4582".to_owned()),
             ..Default::default()
@@ -595,12 +581,21 @@ mod integration_tests {
             events.push(event);
         }
 
-        let gauge_name = random_string(10);
         for i in 0..10 {
             let event = Event::Metric(Metric::Gauge {
-                name: format!("gauge-{}", gauge_name),
+                name: format!("gauge-{}", i),
                 val: i as f64,
                 direction: None,
+                timestamp: None,
+                tags: None,
+            });
+            events.push(event);
+        }
+        for i in 0..5 {
+            let event = Event::Metric(Metric::Gauge {
+                name: format!("gauge-{}", i + 1),
+                val: (i + 1000) as f64,
+                direction: Some(Direction::Plus),
                 timestamp: None,
                 tags: None,
             });
@@ -627,7 +622,7 @@ mod integration_tests {
             events.push(event);
         }
 
-        for i in (0..100).rev() {
+        for i in 0..100 {
             let event = Event::Metric(Metric::Set {
                 name: format!("set-{}", i),
                 val: format!("val{}", i + 1000),
