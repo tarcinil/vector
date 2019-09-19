@@ -26,6 +26,29 @@ pub struct CloudWatchMetricsSvc {
     config: CloudWatchMetricsSinkConfig,
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct MetricKey {
+    name: String,
+    tags: Option<Vec<(String, String)>>,
+}
+
+impl MetricKey {
+    fn new(name: String, tags: Option<HashMap<String, String>>) -> Self {
+        Self {
+            name,
+            tags: tags.map(|m| m.into_iter().collect()),
+        }
+    }
+
+    fn tags(&self) -> Option<HashMap<String, String>> {
+        self.tags.clone().map(|m| m.into_iter().collect())
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
 #[derive(Clone, Default)]
 struct AggregatedMetric<T> {
     val: f64,
@@ -35,9 +58,9 @@ struct AggregatedMetric<T> {
 
 struct MetricBuffer {
     num_items: usize,
-    counters: HashMap<String, AggregatedMetric<f64>>,
-    gauges: HashMap<String, AggregatedMetric<f64>>,
-    sets: HashMap<String, AggregatedMetric<String>>,
+    counters: HashMap<MetricKey, AggregatedMetric<f64>>,
+    gauges: HashMap<MetricKey, AggregatedMetric<f64>>,
+    sets: HashMap<MetricKey, AggregatedMetric<String>>,
 }
 
 impl MetricBuffer {
@@ -66,9 +89,10 @@ impl Batch for MetricBuffer {
                 name,
                 val,
                 timestamp,
-                ..
+                tags,
             } => {
-                let mut counter = self.counters.entry(name).or_default();
+                let key = MetricKey::new(name, tags);
+                let mut counter = self.counters.entry(key).or_default();
                 counter.val += val;
                 counter.vals.push(val);
                 counter.timestamp = timestamp;
@@ -78,9 +102,10 @@ impl Batch for MetricBuffer {
                 val,
                 direction,
                 timestamp,
-                ..
+                tags,
             } => {
-                let mut gauge = self.gauges.entry(name).or_default();
+                let key = MetricKey::new(name, tags);
+                let mut gauge = self.gauges.entry(key).or_default();
 
                 if direction.is_none() {
                     gauge.val = val;
@@ -99,9 +124,10 @@ impl Batch for MetricBuffer {
                 name,
                 val,
                 timestamp,
-                ..
+                tags,
             } => {
-                let mut set = self.sets.entry(name).or_default();
+                let key = MetricKey::new(name, tags);
+                let mut set = self.sets.entry(key).or_default();
                 set.vals.push(val);
                 set.timestamp = timestamp;
             }
@@ -125,31 +151,31 @@ impl Batch for MetricBuffer {
     fn finish(self) -> Self::Output {
         let counters = self.counters.into_iter().map(|(k, v)| {
             Event::Metric(Metric::Counter {
-                name: k.to_string(),
+                name: k.name(),
                 val: v.val,
                 timestamp: v.timestamp,
-                tags: None,
+                tags: k.tags(),
             })
         });
 
         let gauges = self.gauges.into_iter().map(|(k, v)| {
             Event::Metric(Metric::Gauge {
-                name: k.to_string(),
+                name: k.name(),
                 val: v.val,
                 direction: None,
                 timestamp: v.timestamp,
-                tags: None,
+                tags: k.tags(),
             })
         });
 
         let sets = self.sets.into_iter().map(|(k, v)| {
             let set: HashSet<_> = v.vals.into_iter().collect();
             Event::Metric(Metric::Gauge {
-                name: k.to_string(),
+                name: k.name(),
                 val: set.len() as f64,
                 direction: None,
                 timestamp: v.timestamp,
-                tags: None,
+                tags: k.tags(),
             })
         });
 
@@ -587,17 +613,30 @@ mod integration_tests {
                 val: i as f64,
                 direction: None,
                 timestamp: None,
-                tags: None,
+                tags: Some(
+                    vec![
+                        ("production".to_owned(), "true".to_owned()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
             });
             events.push(event);
         }
+
         for i in 0..5 {
             let event = Event::Metric(Metric::Gauge {
                 name: format!("gauge-{}", i + 1),
                 val: (i + 1000) as f64,
                 direction: Some(Direction::Plus),
                 timestamp: None,
-                tags: None,
+                tags: Some(
+                    vec![
+                        ("production".to_owned(), "true".to_owned()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
             });
             events.push(event);
         }
