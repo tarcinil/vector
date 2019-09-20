@@ -11,6 +11,7 @@ use crate::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures::stream::Stream;
 use futures::{stream::FuturesUnordered, Future, Poll};
+use indexmap::IndexMap;
 use rusoto_cloudwatch::{
     CloudWatch, CloudWatchClient, Dimension, MetricDatum, PutMetricDataError, PutMetricDataInput,
 };
@@ -26,7 +27,7 @@ pub struct CloudWatchMetricsSvc {
     config: CloudWatchMetricsSinkConfig,
 }
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct MetricKey {
     name: String,
     tags: Option<Vec<(String, String)>>,
@@ -49,27 +50,28 @@ impl MetricKey {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 struct AggregatedMetric<T> {
     val: f64,
     vals: Vec<T>,
     timestamp: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct MetricBuffer {
     num_items: usize,
-    counters: HashMap<MetricKey, AggregatedMetric<f64>>,
-    gauges: HashMap<MetricKey, AggregatedMetric<f64>>,
-    sets: HashMap<MetricKey, AggregatedMetric<String>>,
+    counters: IndexMap<MetricKey, AggregatedMetric<f64>>,
+    gauges: IndexMap<MetricKey, AggregatedMetric<f64>>,
+    sets: IndexMap<MetricKey, AggregatedMetric<String>>,
 }
 
 impl MetricBuffer {
     fn new() -> Self {
         Self {
             num_items: 0,
-            counters: HashMap::new(),
-            gauges: HashMap::new(),
-            sets: HashMap::new(),
+            counters: IndexMap::new(),
+            gauges: IndexMap::new(),
+            sets: IndexMap::new(),
         }
     }
 }
@@ -142,9 +144,9 @@ impl Batch for MetricBuffer {
     fn fresh(&self) -> Self {
         Self {
             num_items: 0,
-            counters: HashMap::new(),
+            counters: IndexMap::new(),
             gauges: self.gauges.clone(),
-            sets: HashMap::new(),
+            sets: IndexMap::new(),
         }
     }
 
@@ -427,8 +429,10 @@ fn tags_to_dimensions(tags: HashMap<String, String>) -> Vec<Dimension> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sinks::util::batch::BatchSink;
     use crate::{event::metric::Metric, Event};
     use chrono::offset::TimeZone;
+    use futures::{stream, Sink};
     use pretty_assertions::assert_eq;
     use rusoto_cloudwatch::PutMetricDataInput;
 
@@ -552,6 +556,130 @@ mod tests {
             }
         );
     }
+
+    fn tag(name: &str) -> HashMap<String, String> {
+        vec![(name.to_owned(), "true".to_owned())]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn metric_buffer_counters() {
+        let sink = BatchSink::new_min_max(
+            vec![],
+            MetricBuffer::new(),
+            6,
+            0,
+            Some(Duration::from_secs(1)),
+        );
+
+        let mut events = Vec::new();
+        for i in 0..4 {
+            let event = Event::Metric(Metric::Counter {
+                name: "counter-0".into(),
+                val: i as f64,
+                timestamp: None,
+                tags: Some(tag("production")),
+            });
+            events.push(event);
+        }
+
+        for i in 0..4 {
+            let event = Event::Metric(Metric::Counter {
+                name: format!("counter-{}", i),
+                val: i as f64,
+                timestamp: None,
+                tags: Some(tag("staging")),
+            });
+            events.push(event);
+        }
+
+        for i in 0..4 {
+            let event = Event::Metric(Metric::Counter {
+                name: format!("counter-{}", i),
+                val: i as f64,
+                timestamp: None,
+                tags: Some(tag("production")),
+            });
+            events.push(event);
+        }
+
+        let (buffer, _) = sink
+            .send_all(stream::iter_ok(events.into_iter()))
+            .wait()
+            .unwrap();
+
+        let buffer = buffer.into_inner();
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer[0].len(), 6);
+        assert_eq!(buffer[1].len(), 6);
+
+        assert_eq!(
+            buffer[0].clone().finish(),
+            [
+                Event::Metric(Metric::Counter {
+                    name: "counter-0".into(),
+                    val: 6.0,
+                    timestamp: None,
+                    tags: Some(tag("production")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-0".into(),
+                    val: 0.0,
+                    timestamp: None,
+                    tags: Some(tag("staging")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-1".into(),
+                    val: 1.0,
+                    timestamp: None,
+                    tags: Some(tag("staging")),
+                }),
+            ]
+        );
+
+        assert_eq!(
+            buffer[1].clone().finish(),
+            [
+                Event::Metric(Metric::Counter {
+                    name: "counter-2".into(),
+                    val: 2.0,
+                    timestamp: None,
+                    tags: Some(tag("staging")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-3".into(),
+                    val: 3.0,
+                    timestamp: None,
+                    tags: Some(tag("staging")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-0".into(),
+                    val: 0.0,
+                    timestamp: None,
+                    tags: Some(tag("production")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-1".into(),
+                    val: 1.0,
+                    timestamp: None,
+                    tags: Some(tag("production")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-2".into(),
+                    val: 2.0,
+                    timestamp: None,
+                    tags: Some(tag("production")),
+                }),
+                Event::Metric(Metric::Counter {
+                    name: "counter-3".into(),
+                    val: 3.0,
+                    timestamp: None,
+                    tags: Some(tag("production")),
+                }),
+            ]
+        );
+    }
 }
 
 #[cfg(feature = "cloudwatch-metrics-integration-tests")]
@@ -614,11 +742,9 @@ mod integration_tests {
                 direction: None,
                 timestamp: None,
                 tags: Some(
-                    vec![
-                        ("production".to_owned(), "true".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    vec![("production".to_owned(), "true".to_owned())]
+                        .into_iter()
+                        .collect(),
                 ),
             });
             events.push(event);
@@ -631,11 +757,9 @@ mod integration_tests {
                 direction: Some(Direction::Plus),
                 timestamp: None,
                 tags: Some(
-                    vec![
-                        ("production".to_owned(), "true".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    vec![("production".to_owned(), "true".to_owned())]
+                        .into_iter()
+                        .collect(),
                 ),
             });
             events.push(event);
