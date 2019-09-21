@@ -808,8 +808,53 @@ mod tests {
             ]
         );
 
-        assert_eq!(buffer[1].clone().finish().len(), 6);
-        assert_eq!(buffer[2].clone().finish().len(), 1);
+        assert_eq!(
+            buffer[1].clone().finish(),
+            [
+                Event::Metric(Metric::Histogram {
+                    name: "hist-3".into(),
+                    val: 3.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-4".into(),
+                    val: 4.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-5".into(),
+                    val: 5.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-6".into(),
+                    val: 6.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-7".into(),
+                    val: 7.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-8".into(),
+                    val: 8.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+            ]
+        );
 
         assert_eq!(
             buffer[2].clone().finish(),
