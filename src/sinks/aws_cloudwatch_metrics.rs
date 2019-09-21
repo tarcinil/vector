@@ -12,6 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use futures::stream::Stream;
 use futures::{stream::FuturesUnordered, Future, Poll};
 use indexmap::IndexMap;
+use ordered_float::OrderedFloat;
 use rusoto_cloudwatch::{
     CloudWatch, CloudWatchClient, Dimension, MetricDatum, PutMetricDataError, PutMetricDataInput,
 };
@@ -78,14 +79,6 @@ impl MetricBuffer {
     }
 }
 
-#[derive(Default)]
-struct Stats {
-    min: f64,
-    max: f64,
-    sum: f64,
-    count: f64,
-}
-
 impl Batch for MetricBuffer {
     type Input = Event;
     type Output = Vec<Event>;
@@ -106,7 +99,6 @@ impl Batch for MetricBuffer {
                 let key = MetricKey::new(name, tags);
                 let mut counter = self.counters.entry(key).or_default();
                 counter.val += val;
-                counter.vals.push(val);
                 counter.timestamp = timestamp;
             }
             Metric::Gauge {
@@ -129,7 +121,6 @@ impl Batch for MetricBuffer {
                     };
                     gauge.val += delta;
                 }
-                gauge.vals.push(val);
                 gauge.timestamp = timestamp;
             }
             Metric::Set {
@@ -152,7 +143,6 @@ impl Batch for MetricBuffer {
             } => {
                 let key = MetricKey::new(name, tags);
                 let mut hist = self.histograms.entry(key).or_default();
-                hist.val += val;
                 for _ in 0..sample_rate {
                     hist.vals.push(val);
                 }
@@ -207,54 +197,26 @@ impl Batch for MetricBuffer {
         });
 
         let histograms = self.histograms.into_iter().flat_map(|(k, v)| {
-            let stats = v.vals.iter().fold(Stats::default(), |acc, x| {
-                if acc.count == 0.0 {
-                    Stats {
-                        min: *x,
-                        max: *x,
-                        sum: *x,
-                        count: 1.0,
-                    }
-                } else {
-                    Stats {
-                        min: acc.min.min(*x),
-                        max: acc.max.max(*x),
-                        sum: acc.sum + *x,
-                        count: acc.count + 1.0,
-                    }
-                }
-            });
+            let mut sampled: IndexMap<OrderedFloat<f64>, u32> = IndexMap::new();
+            for val in v.vals.iter() {
+                sampled
+                    .entry(OrderedFloat::from(*val))
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+            }
 
-            vec![
-                Event::Metric(Metric::Gauge {
-                    name: format!("{}_min", k.name()),
-                    val: stats.min,
-                    direction: None,
-                    timestamp: v.timestamp,
-                    tags: k.tags(),
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: format!("{}_max", k.name()),
-                    val: stats.max,
-                    direction: None,
-                    timestamp: v.timestamp,
-                    tags: k.tags(),
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: format!("{}_sum", k.name()),
-                    val: stats.sum,
-                    direction: None,
-                    timestamp: v.timestamp,
-                    tags: k.tags(),
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: format!("{}_count", k.name()),
-                    val: stats.count,
-                    direction: None,
-                    timestamp: v.timestamp,
-                    tags: k.tags(),
-                }),
-            ]
+            sampled
+                .iter()
+                .map(|(val, count)| {
+                    Event::Metric(Metric::Histogram {
+                        name: k.name(),
+                        val: **val,
+                        sample_rate: *count,
+                        timestamp: v.timestamp,
+                        tags: k.tags(),
+                    })
+                })
+                .collect::<Vec<_>>()
         });
 
         counters
@@ -772,11 +734,11 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        for i in 0..10 {
+        for i in 0..3 {
             let event = Event::Metric(Metric::Histogram {
                 name: "hist-0".into(),
                 val: i as f64,
-                sample_rate: 1,
+                sample_rate: 10,
                 timestamp: None,
                 tags: None,
             });
@@ -787,7 +749,7 @@ mod tests {
             let event = Event::Metric(Metric::Histogram {
                 name: format!("hist-{}", i),
                 val: i as f64,
-                sample_rate: 10,
+                sample_rate: 1,
                 timestamp: None,
                 tags: None,
             });
@@ -800,109 +762,64 @@ mod tests {
             .unwrap();
 
         let buffer = buffer.into_inner();
-        assert_eq!(buffer.len(), 4);
+        assert_eq!(buffer.len(), 3);
         assert_eq!(buffer[0].len(), 6);
         assert_eq!(buffer[1].len(), 6);
-        assert_eq!(buffer[2].len(), 6);
-        assert_eq!(buffer[3].len(), 2);
+        assert_eq!(buffer[2].len(), 1);
 
         assert_eq!(
             buffer[0].clone().finish(),
             [
-                Event::Metric(Metric::Gauge {
-                    name: "hist-0_min".into(),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-0".into(),
                     val: 0.0,
-                    direction: None,
+                    sample_rate: 11,
                     timestamp: None,
                     tags: None,
                 }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-0_max".into(),
-                    val: 5.0,
-                    direction: None,
+                Event::Metric(Metric::Histogram {
+                    name: "hist-0".into(),
+                    val: 1.0,
+                    sample_rate: 10,
                     timestamp: None,
                     tags: None,
                 }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-0_sum".into(),
-                    val: 15.0,
-                    direction: None,
+                Event::Metric(Metric::Histogram {
+                    name: "hist-0".into(),
+                    val: 2.0,
+                    sample_rate: 10,
                     timestamp: None,
                     tags: None,
                 }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-0_count".into(),
-                    val: 6.0,
-                    direction: None,
+                Event::Metric(Metric::Histogram {
+                    name: "hist-1".into(),
+                    val: 1.0,
+                    sample_rate: 1,
+                    timestamp: None,
+                    tags: None,
+                }),
+                Event::Metric(Metric::Histogram {
+                    name: "hist-2".into(),
+                    val: 2.0,
+                    sample_rate: 1,
                     timestamp: None,
                     tags: None,
                 }),
             ]
         );
 
-        assert_eq!(buffer[1].clone().finish().len(), 4 * 2);
-        assert_eq!(buffer[2].clone().finish().len(), 4 * 6);
+        assert_eq!(buffer[1].clone().finish().len(), 6);
+        assert_eq!(buffer[2].clone().finish().len(), 1);
 
         assert_eq!(
-            buffer[3].clone().finish(),
-            [
-                Event::Metric(Metric::Gauge {
-                    name: "hist-8_min".into(),
-                    val: 8.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-8_max".into(),
-                    val: 8.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-8_sum".into(),
-                    val: 80.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-8_count".into(),
-                    val: 10.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-9_min".into(),
-                    val: 9.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-9_max".into(),
-                    val: 9.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-9_sum".into(),
-                    val: 90.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-                Event::Metric(Metric::Gauge {
-                    name: "hist-9_count".into(),
-                    val: 10.0,
-                    direction: None,
-                    timestamp: None,
-                    tags: None,
-                }),
-            ]
+            buffer[2].clone().finish(),
+            [Event::Metric(Metric::Histogram {
+                name: "hist-9".into(),
+                val: 9.0,
+                sample_rate: 1,
+                timestamp: None,
+                tags: None,
+            }),]
         );
     }
 }
