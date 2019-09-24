@@ -3,12 +3,12 @@
 # A simple example demonstrating the `aws_kinesis_streams` sink
 # Docs: https://docs.vector.dev/usage/configuration/sinks/aws_kinesis_streams
 
-[sinks.my_aws_kinesis_streams_sink]
+[sinks.my_aws_kinesis_firehose_sink]
   # REQUIRED - General
-  type = "aws_kinesis_streams" # must be: aws_kinesis_streams
+  type = "aws_kinesis_firehose" # must be: aws_kinesis_streams
   inputs = ["my-source-id"]
   region = "us-east-1"
-  stream_name = "my-stream"
+  delivery_stream_name = "my-stream"
 
   # OPTIONAL - General
   encoding = "json" # no default, enum: json, text

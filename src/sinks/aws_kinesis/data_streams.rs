@@ -15,25 +15,27 @@ use futures::{stream::iter_ok, Future, Poll, Sink};
 use rand::random;
 use rusoto_core::RusotoFuture;
 use rusoto_kinesis::{
-    DescribeStreamError::ResourceNotFound, DescribeStreamInput, Kinesis, KinesisClient,
-    PutRecordsError, PutRecordsInput, PutRecordsOutput, PutRecordsRequestEntry,
+    DescribeStreamError::{self, ResourceNotFound},
+    DescribeStreamInput, Kinesis, KinesisClient, PutRecordsError, PutRecordsInput,
+    PutRecordsOutput, PutRecordsRequestEntry,
 };
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
 use std::{convert::TryInto, fmt, sync::Arc, time::Duration};
 use string_cache::DefaultAtom as Atom;
 use tower::{Service, ServiceBuilder};
 use tracing_futures::{Instrument, Instrumented};
 
+use super::TowerRequestConfig;
+
 #[derive(Clone)]
 pub struct KinesisService {
     client: Arc<KinesisClient>,
-    config: KinesisSinkConfig,
+    config: KinesisConfig,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
-pub struct KinesisSinkConfig {
+pub struct KinesisConfig {
     pub stream_name: String,
     pub partition_key_field: Option<Atom>,
     #[serde(flatten)]
@@ -41,14 +43,14 @@ pub struct KinesisSinkConfig {
     pub batch_size: Option<usize>,
     pub batch_timeout: Option<u64>,
     pub encoding: Option<Encoding>,
+}
 
-    // Tower Request based configuration
-    pub request_in_flight_limit: Option<usize>,
-    pub request_timeout_secs: Option<u64>,
-    pub request_rate_limit_duration_secs: Option<u64>,
-    pub request_rate_limit_num: Option<u64>,
-    pub request_retry_attempts: Option<usize>,
-    pub request_retry_backoff_secs: Option<u64>,
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct KinesisSinkConfig {
+    #[serde(flatten)]
+    pub kinesis_config: KinesisConfig,
+    #[serde(default, rename = "request")]
+    pub request_config: TowerRequestConfig
 }
 
 #[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
@@ -63,7 +65,7 @@ impl SinkConfig for KinesisSinkConfig {
     fn build(&self, acker: Acker) -> crate::Result<(RouterSink, Healthcheck)> {
         let config = self.clone();
         let sink = KinesisService::new(config, acker)?;
-        let healthcheck = healthcheck(self.clone())?;
+        let healthcheck = healthcheck(self.kinesis_config.clone())?;
         Ok((Box::new(sink), healthcheck))
     }
 
@@ -77,33 +79,32 @@ impl KinesisService {
         config: KinesisSinkConfig,
         acker: Acker,
     ) -> crate::Result<impl Sink<SinkItem = Event, SinkError = ()>> {
-        let client = Arc::new(KinesisClient::new(config.region.clone().try_into()?));
+        let kinesis_config = config.kinesis_config;
+        let request_config = config.request_config;
 
-        let batch_size = config.batch_size.unwrap_or(bytesize::mib(1u64) as usize);
-        let batch_timeout = config.batch_timeout.unwrap_or(1);
+        let client = Arc::new(
+            KinesisClient::new(kinesis_config.region.clone().try_into()?)
+        );
 
-        let timeout = config.request_timeout_secs.unwrap_or(30);
-        let in_flight_limit = config.request_in_flight_limit.unwrap_or(5);
-        let rate_limit_duration = config.request_rate_limit_duration_secs.unwrap_or(1);
-        let rate_limit_num = config.request_rate_limit_num.unwrap_or(5);
-        let retry_attempts = config.request_retry_attempts.unwrap_or(usize::max_value());
-        let retry_backoff_secs = config.request_retry_backoff_secs.unwrap_or(1);
-        let encoding = config.encoding.clone();
-        let partition_key_field = config.partition_key_field.clone();
+        let batch_size = kinesis_config.batch_size.unwrap_or(bytesize::mib(1u64) as usize);
+        let batch_timeout = kinesis_config.batch_timeout.unwrap_or(1);
+
+        let encoding = kinesis_config.encoding.clone();
+        let partition_key_field = kinesis_config.partition_key_field.clone();
 
         let policy = FixedRetryPolicy::new(
-            retry_attempts,
-            Duration::from_secs(retry_backoff_secs),
+            request_config.retry_attempts,
+            Duration::from_secs(request_config.retry_backoff_secs),
             KinesisRetryLogic,
         );
 
-        let kinesis = KinesisService { client, config };
+        let kinesis = KinesisService { client, config: kinesis_config };
 
         let svc = ServiceBuilder::new()
-            .concurrency_limit(in_flight_limit)
-            .rate_limit(rate_limit_num, Duration::from_secs(rate_limit_duration))
+            .concurrency_limit(request_config.in_flight_limit)
+            .rate_limit(request_config.rate_limit_num, Duration::from_secs(request_config.rate_limit_duration_secs))
             .retry(policy)
-            .timeout(Duration::from_secs(timeout))
+            .timeout(Duration::from_secs(request_config.timeout_secs))
             .service(kinesis);
 
         let sink = BatchServiceSink::new(svc, acker)
@@ -165,22 +166,9 @@ impl RetryLogic for KinesisRetryLogic {
     }
 }
 
-#[derive(Debug, Snafu)]
-enum HealthcheckError {
-    #[snafu(display("Retrieval of stream description failed: {}", source))]
-    StreamRetrievalFailed {
-        source: rusoto_kinesis::DescribeStreamError,
-    },
-    #[snafu(display(
-        "Stream returned does not contain any streams that match {}",
-        stream_name
-    ))]
-    NoMatchingStreamName { stream_name: String },
-    #[snafu(display("The stream ({}) is not ready to receive input", stream_name))]
-    StreamIsNotReady { stream_name: String },
-}
+type HealthcheckError = super::HealthcheckError<DescribeStreamError>;
 
-fn healthcheck(config: KinesisSinkConfig) -> crate::Result<crate::sinks::Healthcheck> {
+fn healthcheck(config: KinesisConfig) -> crate::Result<crate::sinks::Healthcheck> {
     let client = KinesisClient::new(config.region.try_into()?);
     let stream_name = config.stream_name;
 
@@ -342,10 +330,13 @@ mod integration_tests {
         ensure_stream(region.clone(), stream.clone());
 
         let config = KinesisSinkConfig {
-            stream_name: stream.clone(),
-            region: RegionOrEndpoint::with_endpoint("http://localhost:4568".into()),
-            batch_size: Some(2),
-            ..Default::default()
+            kinesis_config: KinesisConfig {
+                stream_name: stream.clone(),
+                region: RegionOrEndpoint::with_endpoint("http://localhost:4568".into()),
+                batch_size: Some(2),
+                ..Default::default()
+            },
+            request_config: Default::default()
         };
 
         let mut rt = Runtime::new().unwrap();
