@@ -25,12 +25,12 @@ use string_cache::DefaultAtom as Atom;
 use tower::{Service, ServiceBuilder};
 use tracing_futures::{Instrument, Instrumented};
 
-use super::TowerRequestConfig;
+use super::{Encoding, CoreSinkConfig, TowerRequestConfig};
 
 #[derive(Clone)]
 pub struct KinesisService {
+    stream_name: String,
     client: Arc<KinesisClient>,
-    config: KinesisConfig,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
@@ -40,24 +40,16 @@ pub struct KinesisConfig {
     pub partition_key_field: Option<Atom>,
     #[serde(flatten)]
     pub region: RegionOrEndpoint,
-    pub batch_size: Option<usize>,
-    pub batch_timeout: Option<u64>,
-    pub encoding: Option<Encoding>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct KinesisSinkConfig {
     #[serde(flatten)]
     pub kinesis_config: KinesisConfig,
+    #[serde(default, flatten, rename = "core")]
+    pub core_config: CoreSinkConfig,
     #[serde(default, rename = "request")]
     pub request_config: TowerRequestConfig
-}
-
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum Encoding {
-    Text,
-    Json,
 }
 
 #[typetag::serde(name = "aws_kinesis_streams")]
@@ -81,15 +73,12 @@ impl KinesisService {
     ) -> crate::Result<impl Sink<SinkItem = Event, SinkError = ()>> {
         let kinesis_config = config.kinesis_config;
         let request_config = config.request_config;
+        let core_config = config.core_config;
 
         let client = Arc::new(
             KinesisClient::new(kinesis_config.region.clone().try_into()?)
         );
 
-        let batch_size = kinesis_config.batch_size.unwrap_or(bytesize::mib(1u64) as usize);
-        let batch_timeout = kinesis_config.batch_timeout.unwrap_or(1);
-
-        let encoding = kinesis_config.encoding.clone();
         let partition_key_field = kinesis_config.partition_key_field.clone();
 
         let policy = FixedRetryPolicy::new(
@@ -98,7 +87,14 @@ impl KinesisService {
             KinesisRetryLogic,
         );
 
-        let kinesis = KinesisService { client, config: kinesis_config };
+        let kinesis = KinesisService {
+            stream_name: kinesis_config.stream_name,
+            client
+        };
+
+        let batch_size = core_config.batch_size;
+        let batch_timeout = core_config.batch_timeout;
+        let encoding = core_config.encoding.clone();
 
         let svc = ServiceBuilder::new()
             .concurrency_limit(request_config.in_flight_limit)
@@ -132,7 +128,7 @@ impl Service<Vec<PutRecordsRequestEntry>> for KinesisService {
 
         let request = PutRecordsInput {
             records,
-            stream_name: self.config.stream_name.clone(),
+            stream_name: self.stream_name.clone(),
         };
 
         self.client
@@ -144,7 +140,7 @@ impl Service<Vec<PutRecordsRequestEntry>> for KinesisService {
 impl fmt::Debug for KinesisService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KinesisService")
-            .field("config", &self.config)
+            .field("stream_name", &self.stream_name)
             .finish()
     }
 }

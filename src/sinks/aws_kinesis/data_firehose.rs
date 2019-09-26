@@ -27,12 +27,12 @@ use std::{
 use tower::{Service, ServiceBuilder};
 use tracing_futures::{Instrument, Instrumented};
 
-use super::TowerRequestConfig;
+use super::{Encoding, CoreSinkConfig, TowerRequestConfig};
 
 #[derive(Clone)]
 pub struct FirehoseService {
+    delivery_stream_name: String,
     client: Arc<KinesisFirehoseClient>,
-    config: FirehoseConfig,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
@@ -41,24 +41,16 @@ pub struct FirehoseConfig {
     pub delivery_stream_name: String,
     #[serde(flatten)]
     pub region: RegionOrEndpoint,
-    pub batch_size: Option<usize>,
-    pub batch_timeout: Option<u64>,
-    pub encoding: Option<Encoding>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct FirehoseSinkConfig {
     #[serde(flatten)]
     pub firehose_config: FirehoseConfig,
+    #[serde(default, flatten, rename = "core")]
+    pub core_config: CoreSinkConfig,
     #[serde(default, rename = "request")]
     pub request_config: TowerRequestConfig
-}
-
-#[derive(Deserialize, Serialize, Debug, Eq, PartialEq, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum Encoding {
-    Text,
-    Json,
 }
 
 #[typetag::serde(name = "aws_kinesis_firehose")]
@@ -76,21 +68,42 @@ impl SinkConfig for FirehoseSinkConfig {
 }
 
 impl FirehoseService {
+
+    fn construct<L,T,S,B>(svc: S,
+                          policy: FixedRetryPolicy<L>,
+                          acker: Acker,
+                          ccfg: CoreSinkConfig,
+                          rcfg: TowerRequestConfig) -> crate::Result<impl Sink<SinkItem = Event, SinkError = ()>>
+    where L: RetryLogic,
+          S: Service<T> + Clone + Sync,
+          <S as tower_service::Service<T>>::Error: std::marker::Sync,
+          B: crate::sinks::util::Batch<Output = T> {
+        let svc = ServiceBuilder::new()
+            .concurrency_limit(rcfg.in_flight_limit)
+            .rate_limit(rcfg.rate_limit_num, Duration::from_secs(rcfg.rate_limit_duration_secs))
+            .retry(policy)
+            .timeout(Duration::from_secs(rcfg.timeout_secs))
+            .service(svc);
+
+        let encoding = ccfg.encoding.clone();
+        let sink = BatchServiceSink::new(svc, acker)
+            .batched_with_min(Vec::new(), ccfg.batch_size, Duration::from_secs(ccfg.batch_timeout))
+            .with_flat_map(move |e| iter_ok(encode_event(e, &encoding)));
+
+        Ok(sink)
+    }
+
     pub fn new(
         config: FirehoseSinkConfig,
         acker: Acker,
     ) -> crate::Result<impl Sink<SinkItem = Event, SinkError = ()>> {
         let firehose_config = config.firehose_config;
         let request_config = config.request_config;
+        let core_config = config.core_config;
 
         let client = Arc::new(KinesisFirehoseClient::new(
             firehose_config.region.clone().try_into()?,
         ));
-
-        let batch_size = firehose_config.batch_size.unwrap_or(bytesize::mib(1u64) as usize);
-        let batch_timeout = firehose_config.batch_timeout.unwrap_or(1);
-
-        let encoding = firehose_config.encoding.clone();
 
         let policy = FixedRetryPolicy::new(
             request_config.retry_attempts,
@@ -98,20 +111,12 @@ impl FirehoseService {
             FirehoseRetryLogic,
         );
 
-        let kinesis = FirehoseService { client, config: firehose_config };
+        let firehose = FirehoseService {
+            delivery_stream_name: firehose_config.delivery_stream_name,
+            client
+        };
 
-        let svc = ServiceBuilder::new()
-            .concurrency_limit(request_config.in_flight_limit)
-            .rate_limit(request_config.rate_limit_num, Duration::from_secs(request_config.rate_limit_duration_secs))
-            .retry(policy)
-            .timeout(Duration::from_secs(request_config.timeout_secs))
-            .service(kinesis);
-
-        let sink = BatchServiceSink::new(svc, acker)
-            .batched_with_min(Vec::new(), batch_size, Duration::from_secs(batch_timeout))
-            .with_flat_map(move |e| iter_ok(encode_event(e, &encoding)));
-
-        Ok(sink)
+        Self::construct(firehose, policy, acker, core_config, request_config)
     }
 }
 
@@ -132,7 +137,7 @@ impl Service<Vec<Record>> for FirehoseService {
 
         let request = PutRecordBatchInput {
             records,
-            delivery_stream_name: self.config.delivery_stream_name.clone(),
+            delivery_stream_name: self.delivery_stream_name.clone(),
         };
 
         self.client
@@ -144,7 +149,7 @@ impl Service<Vec<Record>> for FirehoseService {
 impl fmt::Debug for FirehoseService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FirehoseService")
-            .field("config", &self.config)
+            .field("delivery_stream_name", &self.delivery_stream_name)
             .finish()
     }
 }
