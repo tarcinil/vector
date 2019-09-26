@@ -1,6 +1,6 @@
 use crate::{
     buffers::Acker,
-    event::{Event, Metric},
+    event::Metric,
     region::RegionOrEndpoint,
     sinks::util::{
         retries::{FixedRetryPolicy, RetryLogic},
@@ -136,10 +136,10 @@ impl CloudWatchMetricsSvc {
         }
     }
 
-    fn encode_events(&mut self, events: Vec<Event>) -> PutMetricDataInput {
+    fn encode_events(&mut self, events: Vec<Metric>) -> PutMetricDataInput {
         let metric_data: Vec<_> = events
             .into_iter()
-            .filter_map(|event| match event.into_metric() {
+            .filter_map(|event| match event {
                 Metric::Counter {
                     name,
                     val,
@@ -194,7 +194,7 @@ impl CloudWatchMetricsSvc {
     }
 }
 
-impl Service<Vec<Event>> for CloudWatchMetricsSvc {
+impl Service<Vec<Metric>> for CloudWatchMetricsSvc {
     type Response = ();
     type Error = PutMetricDataError;
     type Future = RusotoFuture<(), PutMetricDataError>;
@@ -203,7 +203,7 @@ impl Service<Vec<Event>> for CloudWatchMetricsSvc {
         Ok(().into())
     }
 
-    fn call(&mut self, items: Vec<Event>) -> Self::Future {
+    fn call(&mut self, items: Vec<Metric>) -> Self::Future {
         let input = self.encode_events(items);
 
         if !input.metric_data.is_empty() {
@@ -255,7 +255,7 @@ fn tags_to_dimensions(tags: HashMap<String, String>) -> Vec<Dimension> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event::metric::Metric, Event};
+    use crate::event::metric::Metric;
     use chrono::offset::TimeZone;
     use pretty_assertions::assert_eq;
     use rusoto_cloudwatch::PutMetricDataInput;
@@ -279,19 +279,19 @@ mod tests {
     #[test]
     fn encode_events_basic_counter() {
         let events = vec![
-            Event::Metric(Metric::Counter {
+            Metric::Counter {
                 name: "exception_total".into(),
                 val: 1.0,
                 timestamp: None,
                 tags: None,
-            }),
-            Event::Metric(Metric::Counter {
+            },
+            Metric::Counter {
                 name: "bytes_out".into(),
                 val: 2.5,
                 timestamp: Some(Utc.ymd(2018, 11, 14).and_hms_nano(8, 9, 10, 123456789)),
                 tags: None,
-            }),
-            Event::Metric(Metric::Counter {
+            },
+            Metric::Counter {
                 name: "healthcheck".into(),
                 val: 1.0,
                 timestamp: Some(Utc.ymd(2018, 11, 14).and_hms_nano(8, 9, 10, 123456789)),
@@ -300,7 +300,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 ),
-            }),
+            },
         ];
 
         assert_eq!(
@@ -336,13 +336,13 @@ mod tests {
 
     #[test]
     fn encode_events_absolute_gauge() {
-        let events = vec![Event::Metric(Metric::Gauge {
+        let events = vec![Metric::Gauge {
             name: "temperature".into(),
             val: 10.0,
             direction: None,
             timestamp: None,
             tags: None,
-        })];
+        }];
 
         assert_eq!(
             svc().encode_events(events),
@@ -359,13 +359,13 @@ mod tests {
 
     #[test]
     fn encode_events_histogram() {
-        let events = vec![Event::Metric(Metric::Histogram {
+        let events = vec![Metric::Histogram {
             name: "latency".into(),
             val: 11.0,
             sample_rate: 100,
             timestamp: None,
             tags: None,
-        })];
+        }];
 
         assert_eq!(
             svc().encode_events(events),
@@ -386,6 +386,7 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use crate::event::Event;
     use crate::region::RegionOrEndpoint;
     use crate::test_util::{random_string, runtime};
     use chrono::offset::TimeZone;
