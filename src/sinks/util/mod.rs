@@ -13,9 +13,9 @@ use std::time::Duration;
 use tower::Service;
 
 pub use batch::{Batch, BatchSink};
-pub use buffer::{Buffer, Compression, PartitionBuffer, PartitionInnerBuffer};
 pub use buffer::metrics::MetricBuffer;
 pub use buffer::partition::{Partition, PartitionedBatchSink};
+pub use buffer::{Buffer, Compression, PartitionBuffer, PartitionInnerBuffer};
 
 pub trait SinkExt<T>
 where
