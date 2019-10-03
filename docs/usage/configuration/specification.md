@@ -1847,13 +1847,6 @@ end
   # * no default
   api_key = "3111111111111111aaaaaaaaaaaaaaaa"
 
-  # Datadog endpoint to send metrics to.
-  # 
-  # * required
-  # * no default
-  host = "https://api.datadoghq.com"
-  host = "https://api.datadoghq.eu"
-
   # A prefix that will be added to all metric names.
   # 
   # * required
@@ -1865,6 +1858,13 @@ end
   # * optional
   # * default: true
   healthcheck = true
+
+  # Datadog endpoint to send metrics to.
+  # 
+  # * optional
+  # * default: "https://api.datadoghq.com"
+  host = "https://api.datadoghq.com"
+  host = "https://api.datadoghq.eu"
 
 # Batches `log` events to Elasticsearch via the `_bulk` API endpoint.
 [sinks.elasticsearch]

@@ -17,6 +17,7 @@ use tracing_tower_http::InstrumentedHttpService;
 
 pub type RequestBuilder = Box<dyn Fn(Vec<u8>) -> hyper::Request<Vec<u8>> + Sync + Send>;
 pub type Response = hyper::Response<Bytes>;
+pub type Error = hyper::Error;
 
 #[derive(Clone)]
 pub struct HttpService {
@@ -90,7 +91,7 @@ impl HttpServiceBuilder {
 
 impl Service<Vec<u8>> for HttpService {
     type Response = Response;
-    type Error = hyper::Error;
+    type Error = Error;
     type Future = Box<dyn Future<Item = Self::Response, Error = Self::Error> + Send + 'static>;
 
     fn poll_ready(&mut self) -> Poll<(), Self::Error> {
