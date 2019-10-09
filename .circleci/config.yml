@@ -69,7 +69,9 @@ jobs:
       - checkout
       - run:
           name: Check for Documentation Updates
-          command:  scripts/check-generate.sh
+          command:  |
+            gem install bundler --version X.Y.Z --force
+            scripts/check-generate.sh
 
   test-stable:
     resource_class: xlarge
