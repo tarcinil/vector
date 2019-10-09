@@ -40,7 +40,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Check code
+          name: Lint Code for Errors
           environment:
             RUSTFLAGS: "-D warnings"
           command: cargo check --all --all-features --all-targets
@@ -51,7 +51,7 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Check fmt
+          name: Lint Formatting
           environment:
             RUSTFLAGS: "-D warnings"
           command: |
@@ -60,12 +60,14 @@ jobs:
 
   check-generate:
     docker:
-      - image: rust:1.38.0
+      - image: ruby:2.6
     steps:
       - checkout
       - run:
-          name: Check generate
-          command: make check-generate
+          name: Check for Documentation Updates
+          command: |
+            bundle install --gemfile=scripts/Gemfile > /dev/null
+            scripts/check-generate.sh
 
   test-stable:
     resource_class: xlarge
