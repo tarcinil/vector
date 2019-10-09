@@ -47,7 +47,7 @@ jobs:
 
   check-fmt:
     docker:
-      - image: timberiodev/vector-checker:latest
+      - image: rust:1.38.0
     steps:
       - checkout
       - run:
@@ -56,11 +56,11 @@ jobs:
             RUSTFLAGS: "-D warnings"
           command: |
             rustup component add rustfmt
-            make check-fmt
+            cargo fmt -- --check
 
   check-generate:
     docker:
-      - image: timberiodev/vector-checker:latest
+      - image: rust:1.38.0
     steps:
       - checkout
       - run:
@@ -70,7 +70,7 @@ jobs:
   test-stable:
     resource_class: xlarge
     docker:
-      - image: rust:latest
+      - image: rust:1.38.0
         environment:
           RUST_BACKTRACE: full
           AWS_ACCESS_KEY_ID: "fake-aws-key"
@@ -546,12 +546,15 @@ release-filters: &release-filters
     tags:
       only: /v.*/
 
-require-builds: &require-builds
+require-tests: &require-tests
   requires:
     - check-code
     - check-fmt
     - check-generate
     - test-stable
+
+require-builds: &require-builds
+  requires:
     - build-x86_64-unknown-linux-gnu-archive
     - build-x86_64-unknown-linux-musl-archive
     - build-x86_64-apple-darwin-archive
@@ -621,10 +624,13 @@ workflows:
       # Building & packaging
 
       - build-x86_64-unknown-linux-gnu-archive:
+          <<: *require-tests
           <<: *test-filters
       - build-x86_64-unknown-linux-musl-archive:
+          <<: *require-tests
           <<: *test-filters
       - build-x86_64-apple-darwin-archive:
+          <<: *require-tests
           <<: *test-filters
       - package-rpm:
           <<: *require-builds
