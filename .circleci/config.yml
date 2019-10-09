@@ -61,14 +61,13 @@ jobs:
   check-generate:
     docker:
       - image: ruby:2.6
-    working_directory: scripts
     ignore:
       - master # Checking Documentation should only be needed on branches
     steps:
       - checkout
       - run:
           name: Check for Documentation Updates
-          command:  sh check-generate.sh
+          command:  scripts/check-generate.sh
 
   test-stable:
     resource_class: xlarge
