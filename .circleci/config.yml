@@ -36,14 +36,14 @@ jobs:
   check-code:
     resource_class: xlarge
     docker:
-      - image: timberiodev/vector-checker:latest
+      - image: rust:1.38.0
     steps:
       - checkout
       - run:
           name: Check code
           environment:
             RUSTFLAGS: "-D warnings"
-          command: make check-code
+          command: cargo check --all --all-features --all-targets
 
   check-fmt:
     docker:
