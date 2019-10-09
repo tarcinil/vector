@@ -61,7 +61,7 @@ jobs:
   check-generate:
     docker:
       - image: ruby:2.6
-    working_directory: ~/scripts
+    working_directory: scripts
     ignore:
       - master # Checking Documentation should only be needed on branches
     steps:
