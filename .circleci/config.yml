@@ -71,6 +71,7 @@ jobs:
           name: Check for Documentation Updates
           command:  |
             gem install bundler --version 2.0.2 --force
+            bundle install --gemfile=scripts/Gemfile 
             scripts/check-generate.sh
 
   test-stable:
