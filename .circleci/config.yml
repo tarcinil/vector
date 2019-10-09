@@ -48,8 +48,6 @@ jobs:
   check-fmt:
     docker:
       - image: rust:1.38.0
-    environment:
-      BUNDLER_VERSION: 2.0.2
     steps:
       - checkout
       - run:
@@ -63,6 +61,8 @@ jobs:
   check-generate:
     docker:
       - image: ruby:2.6
+    environment:
+      BUNDLER_VERSION: 2.0.2
     ignore:
       - master # Checking Documentation should only be needed on branches
     steps:
@@ -70,7 +70,7 @@ jobs:
       - run:
           name: Check for Documentation Updates
           command:  |
-            gem install bundler --version X.Y.Z --force
+            gem install bundler --version 2.0.2 --force
             scripts/check-generate.sh
 
   test-stable:
